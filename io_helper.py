@@ -17,7 +17,7 @@ def read_dsv(path, dt_us=None):
     hdr: dict of header key/values 
     """
     hdr, vals, in_vals = {}, [], False
-    with open(path, error="ignore") as f:
+    with open(path, errors="ignore") as f:
         for line in f:
             s = line.strip()
             if not s:
@@ -40,10 +40,7 @@ def read_dsv(path, dt_us=None):
     if dt_us is None:
         dt = float(hdr.get("VERTINTERVAL", 1.0)) * 1e-6
     else:
-        res = float(hdr["HORIZONTALRESOLUTION"]) 
-        unit = hdr.get("HORIZONTALUNIT", "us").lower()
-        scale = 1e-3 if unit.startswith("ms") else 1.0 if unit == "s" else 1e-6
-        dt = res * scale
+        dt = dt_us * 1e-6
     return g, dt, hdr
 
 TERM_FOR_AXIS = {"x": 1, "y": 2, "z": 3}

@@ -1,14 +1,16 @@
+
 """
 Apply a measured GIRF to Siemens .dsv gradient waveform and save a MATLAB .mat file with the results.
-
+ 
 With pixi:
-    pixi run apply-girf --girf_dir /path/to/GIRF --order 1 --dsv_x seq_GRX.dsv --dsv_y seq_GRY.dsv --dsv_z seq_GRZ.dsv --out_mat seq_GIRF.mat
+    pixi run apply-girf --girf_dir /path/to/GIRF --order 1 --dsv_x seq_GRX.dsv --dsv_y seq_GRY.dsv --dsv_z seq_GRZ.dsv --out seq_GIRF.mat --plot
 """
 import argparse
 from io_helper import read_dsv, load_girf, save_mat, TERM_FOR_AXIS
+from plotting import plot_kspace
 from core import apply_girf, kspace, girf_dc_gain 
 import numpy as np
-
+ 
 def process_axis(axis, dsv_path, girf_path, order, term, dsv_scale, dt_us, pad_us):
     """Read one DSV, apply that axis's GIRF, return a dict of MATLAB variables."""
     g, dt, _ = read_dsv(dsv_path, dt_us)
@@ -16,7 +18,7 @@ def process_axis(axis, dsv_path, girf_path, order, term, dsv_scale, dt_us, pad_u
     freq, H, params = load_girf(girf_path, axis, order, term)
  
     g_nom, g_act, clipped = apply_girf(g, dt, freq, H, pad_us)
-    dc = girf_dc_gain(freq, H)
+    dc = abs(girf_dc_gain(H, freq))
  
     print(f"[{axis}] samples={len(g)} dt={dt*1e6:.3f} us  band=+-{freq.max()/1e3:.1f} kHz  "
           f"|H(0)|={dc:.3f}  peak nom={np.abs(g_nom).max():.3f} act={np.abs(g_act).max():.3f} mT/m")
@@ -49,6 +51,8 @@ def parse_args():
     ap.add_argument("--dt_us", type=float, default=None, help="Override DSV sample interval (us)")
     ap.add_argument("--pad_us", type=float, default=500.0, help="Zero padding after waveform (us)")
     ap.add_argument("--out", required=True, help="Output .mat file")
+    ap.add_argument("--plot", action="store_true", help="Show k-space before/after GIRF")
+    ap.add_argument("--save_fig", default=None, help="Save the k-space figure (e.g. kspace.png)")
     return ap.parse_args()
  
  
@@ -68,8 +72,9 @@ def main():
         raise SystemExit("Give at least one of --dsv_x / --dsv_y / --dsv_z")
     save_mat(args.out, out)
     print(f"Saved {args.out}")
+    if args.plot or args.save_fig:
+        plot_kspace(out, save=args.save_fig, show=args.plot)
  
  
 if __name__ == "__main__":
     main()
- 
