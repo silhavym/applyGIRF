@@ -28,6 +28,9 @@ def read_dsv(path, dt_us=None):
             if in_vals:
                 if s.startswith('['):
                     break
+                s = s.split(';')[0].strip()
+                if not s:
+                    continue 
                 vals.append(float(s.split()[0]))
             elif "=" in s:
                 k, v = s.split("=", 1)
