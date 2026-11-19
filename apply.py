@@ -3,32 +3,25 @@
 Apply a measured GIRF to Siemens .dsv gradient waveform and save a MATLAB .mat file with the results.
  
 With pixi:
-    pixi run apply-girf --girf_dir /path/to/GIRF --order 1 \
-  --dsv_x seq_GRX.dsv --dsv_y seq_GRY.dsv \
-  --out seq_GIRF.mat \
-  --kfile seq.kfile --adc_dwell_us 10 --adc_start_us 0 \
-  --save_fig kspace.png
-
-To also write a k-file (k-space position + gradient at every ADC sample):
-    ... --kfile seq.kfile --adc_dwell_us 10 --adc_start_us 0 [--adc_n 2000] [--kaxes xy]
+    pixi run apply-girf --girf_dir /path/to/GIRF --order 1 --dsv_x seq_GRX.dsv --dsv_y seq_GRY.dsv --dsv_z seq_GRZ.dsv --out seq_GIRF.mat --plot
 """
 import argparse
 from io_helper import read_dsv, load_girf, save_mat, TERM_FOR_AXIS
 from plotting import plot_kspace
-from kfile import build_kfile, write_kfile
+from kfile import update_kfile, adc_start_from_dsv, default_out_name
 from core import apply_girf, kspace, girf_dc_gain 
 import numpy as np
  
 def process_axis(axis, dsv_path, girf_path, order, term, dsv_scale, dt_us, pad_us):
     """Read one DSV, apply that axis's GIRF, return a dict of MATLAB variables."""
-    g, dt, _ = read_dsv(dsv_path, dt_us)
+    g, dt, hdr = read_dsv(dsv_path, dt_us)
     g = g * dsv_scale                                   # -> mT/m
     freq, H, params = load_girf(girf_path, axis, order, term)
  
     g_nom, g_act, clipped = apply_girf(g, dt, freq, H, pad_us)
     dc = abs(girf_dc_gain(H, freq))
  
-    print(f"[{axis}] samples={len(g)} dt={dt*1e6:.3f} us  band=+-{freq.max()/1e3:.1f} kHz  "
+    print(f"[{axis}] samples={len(g)} dt={dt*1e6:.3f} us  unit={hdr.get('VERTUNITNAME', '?')}  band=+-{freq.max()/1e3:.1f} kHz  "
           f"|H(0)|={dc:.3f}  peak nom={np.abs(g_nom).max():.3f} act={np.abs(g_act).max():.3f} mT/m")
     if abs(dc - 1) > 0.1:
         print(f"    WARNING: |H(0)| is not ~1 -> check term index and units for axis {axis}")
@@ -59,13 +52,15 @@ def parse_args():
     ap.add_argument("--dt_us", type=float, default=None, help="Override DSV sample interval (us)")
     ap.add_argument("--pad_us", type=float, default=500.0, help="Zero padding after waveform (us)")
     ap.add_argument("--out", required=True, help="Output .mat file")
-    ap.add_argument("--kfile", default=None, help="Also write a k-file with k and g at each ADC sample")
-    ap.add_argument("--adc_dwell_us", type=float, default=None, help="ADC dwell time (us); required with --kfile")
-    ap.add_argument("--adc_start_us", type=float, default=0.0, help="Time of first ADC sample after DSV start (us)")
-    ap.add_argument("--adc_n", type=int, default=None, help="Number of ADC samples (default: to end of waveform)")
-    ap.add_argument("--kaxes", default=None, help="Axes in the k-file, e.g. xy (default: all axes given)")
     ap.add_argument("--plot", action="store_true", help="Show k-space before/after GIRF")
     ap.add_argument("--save_fig", default=None, help="Save the k-space figure (e.g. kspace.png)")
+    ap.add_argument("--kfile", default=None, help="Rapid-MRSI k-file (CSV: TR,Kx,Ky,time) to update with the GIRF k-space")
+    ap.add_argument("--kfile_out", default=None, help="Output k-file (default <kfile>_girf.txt)")
+    ap.add_argument("--adc_start_us", type=float, default=None, help="ADC start time relative to DSV start (us)")
+    ap.add_argument("--dsv_adc", default=None, help="*_ADC.dsv; used to find the ADC start if --adc_start_us is not given")
+    ap.add_argument("--k_time_scale", type=float, default=1.0, help="Multiply the k-file 'time' column by this to get seconds")
+    ap.add_argument("--k_mode", choices=["replace", "delta"], default="replace",
+                    help="replace: Kx,Ky = GIRF k;  delta: Kx,Ky += (GIRF k - nominal k)")
     return ap.parse_args()
  
  
@@ -86,12 +81,17 @@ def main():
     save_mat(args.out, out)
     print(f"Saved {args.out}")
     if args.kfile:
-        if args.adc_dwell_us is None:
-            raise SystemExit("--kfile needs --adc_dwell_us")
-        axes = args.kaxes or "".join(a for a in "xyz" if f"t_{a}" in out)
-        kf = build_kfile(out, axes, args.adc_dwell_us, args.adc_start_us, args.adc_n)
-        write_kfile(args.kfile, kf, args.adc_dwell_us, args.adc_start_us)
-        print(f"Saved {args.kfile}  ({len(kf['t_adc'])} ADC points, axes={axes})")
+        if "kx_act" not in out or "ky_act" not in out:
+            raise SystemExit("--kfile needs both --dsv_x and --dsv_y")
+        if args.adc_start_us is not None:
+            adc_start = args.adc_start_us * 1e-6
+        elif args.dsv_adc:
+            adc_start = adc_start_from_dsv(args.dsv_adc)
+            print(f"ADC start from {args.dsv_adc}: {adc_start*1e6:.1f} us")
+        else:
+            raise SystemExit("--kfile needs --adc_start_us or --dsv_adc")
+        update_kfile(args.kfile, args.kfile_out or default_out_name(args.kfile), out,
+                     adc_start, args.k_time_scale, args.k_mode)
     if args.plot or args.save_fig:
         plot_kspace(out, save=args.save_fig, show=args.plot)
  
