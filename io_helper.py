@@ -57,9 +57,13 @@ def load_girf(path, axis, order=1, term=None):
     """
     term = TERM_FOR_AXIS[axis] if term is None else term
     if os.path.isdir(path):
-        npz = os.path.join(path, f"SphericalHarmonics_{axis.upper()}_{order}.npz")
+        name = f"SphericalHarmonics_{axis.upper()}_{order}"
+        npz = os.path.join(path, name + ".npz")
+        sub = os.path.join(path, name)
         if os.path.exists(npz):
             path = npz
+        elif os.path.isdir(sub):
+            path = sub
  
     if path.endswith(".npz"):
         d = np.load(path, allow_pickle=True)
