@@ -1,35 +1,25 @@
 """
-Update a rapid-MRSI k-space file (CSV: TR,Kx,Ky,time) with the GIRF-predicted trajectory.
+Generate a rapid-MRSI k-space file (CSV: TR,Kx,Ky,time) from the GIRF-predicted trajectory.
 
-Only the Kx and Ky columns are rewritten. TR, time and any other column are
-copied through exactly as they were in the original file.
 Kx, Ky are in mm^-1 (cycles/mm); the GIRF code works in cycles/m, hence the /1e3.
+'time' is the sampling time relative to the start of the ADC.
+By default k is referenced so that k = 0 at the first ADC sample, which is what
+FID-A's rosette tools assume for the k-file.
 """
 import csv
-import os
 import numpy as np
 from io_helper import read_dsv
 
-
-def read_kfile(path):
-    """Return (header, rows-as-strings, column-index dict keyed by lower-case name)."""
-    with open(path, newline="") as f:
-        rows = [r for r in csv.reader(f) if r]
-    header = [h.strip() for h in rows[0]]
-    col = {h.lower(): i for i, h in enumerate(header)}
-    missing = [c for c in ("tr", "kx", "ky", "time") if c not in col]
-    if missing:
-        raise ValueError(f"{path}: expected columns TR,Kx,Ky,time but found {header}")
-    return header, rows[1:], col
+TIME_UNIT = {"s": 1.0, "ms": 1e3, "us": 1e6}      # seconds -> unit
 
 
-def adc_start_from_dsv(path):
-    """Time (s) of the first ADC-active sample in a Siemens *_ADC.dsv file."""
+def adc_window_from_dsv(path):
+    """(start, duration) in seconds of the ADC-active period in a Siemens *_ADC.dsv file."""
     a, dt, _ = read_dsv(path)
     active = np.flatnonzero(np.abs(a) > 0.5 * np.abs(a).max())
     if len(active) == 0:
         raise ValueError(f"No ADC activity found in {path}")
-    return active[0] * dt
+    return active[0] * dt, (active[-1] - active[0] + 1) * dt
 
 
 def _k_nodes(out, axis, kind):
@@ -40,47 +30,37 @@ def _k_nodes(out, axis, kind):
     return t, k
 
 
-def update_kfile(kfile_in, kfile_out, out, adc_start_s, time_scale=1.0, mode="replace"):
+def make_kfile(path, out, adc_start_s, dwell_s, n_adc, n_tr=1, time_unit="s",
+               zero_at_adc_start=True):
     """
     out         : dict built by apply.py (needs the x and y axes)
     adc_start_s : time of the first ADC sample, relative to the start of the DSV (s)
-    time_scale  : multiply the k-file 'time' column by this to get seconds
-    mode        : 'replace' -> Kx,Ky = GIRF-predicted k at the ADC times
-                  'delta'   -> Kx,Ky = old Kx,Ky + (GIRF k - nominal DSV k)
+    dwell_s     : ADC dwell time (s)
+    n_adc       : number of ADC samples in one pass
+    n_tr        : the one-pass trajectory is written this many times (TR = 1..n_tr)
     """
-    header, rows, col = read_kfile(kfile_in)
-    t_q = adc_start_s + time_scale * np.array([float(r[col["time"]]) for r in rows])
+    t_rel = np.arange(n_adc) * dwell_s            # time relative to ADC start
+    t_q = adc_start_s + t_rel
+    cols = {}
+    for a, name in (("x", "Kx"), ("y", "Ky")):
+        tk, k_act = _k_nodes(out, a, "act")
+        if t_q.max() > tk[-1]:
+            raise ValueError(f"ADC ends at {t_q.max()*1e3:.3f} ms but the DSV waveform (plus "
+                             f"padding) ends at {tk[-1]*1e3:.3f} ms. Check --adc_start_us, "
+                             f"--dwell_us and --n_adc.")
+        k = np.interp(t_q, tk, k_act) / 1e3                       # cycles/m -> mm^-1
+        if zero_at_adc_start:
+            k = k - k[0]
+        cols[name] = k
 
-    for a, name in (("x", "kx"), ("y", "ky")):
-        tk, k_nom = _k_nodes(out, a, "nom")
-        _, k_act = _k_nodes(out, a, "act")
-        if t_q.min() < 0 or t_q.max() > tk[-1]:
-            raise ValueError(
-                f"k-file sample times span {t_q.min()*1e3:.3f}..{t_q.max()*1e3:.3f} ms but the "
-                f"DSV waveform spans 0..{tk[-1]*1e3:.3f} ms. Check --adc_start_us and "
-                f"--k_time_scale (use 1e-3 if the 'time' column is in ms, 1e-6 if in us).")
-        nom = np.interp(t_q, tk, k_nom) / 1e3
-        act = np.interp(t_q, tk, k_act) / 1e3
-        old = np.array([float(r[col[name]]) for r in rows])
-        new = act if mode == "replace" else old + (act - nom)
-
-        rms = lambda v: float(np.sqrt(np.mean(v ** 2)))
-        print(f"[K{a}] file vs DSV-nominal: rms diff {rms(nom - old):.4g} mm^-1 "
-              f"(file rms {rms(old):.4g});  GIRF shift rms {rms(act - nom):.4g} mm^-1")
-        if rms(nom - old) > 0.1 * rms(old):
-            print(f"    WARNING: the DSV nominal trajectory does not match the k-file for K{a}. "
-                  f"Check --adc_start_us/--dsv_adc, --k_time_scale, and the sign/axis mapping, "
-                  f"or use --k_mode delta.")
-        for r, v in zip(rows, new):
-            r[col[name]] = f"{v:.10g}"
-
-    with open(kfile_out, "w", newline="") as f:
+    tcol = t_rel * TIME_UNIT[time_unit]
+    with open(path, "w", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
-        w.writerow(header)
-        w.writerows(rows)
-    print(f"Saved {kfile_out}  ({len(rows)} rows, mode={mode})")
-
-
-def default_out_name(kfile_in):
-    base, ext = os.path.splitext(kfile_in)
-    return f"{base}_girf{ext or '.txt'}"
+        w.writerow(["TR", "Kx", "Ky", "time"])
+        for tr in range(1, n_tr + 1):
+            for i in range(n_adc):
+                w.writerow([tr, f"{cols['Kx'][i]:.10g}", f"{cols['Ky'][i]:.10g}", f"{tcol[i]:.10g}"])
+    print(f"Saved {path}  ({n_adc} points x {n_tr} TR, dwell {dwell_s*1e6:.2f} us, "
+          f"ADC start {adc_start_s*1e6:.1f} us, time in {time_unit}, "
+          f"k={'0 at first ADC point' if zero_at_adc_start else 'absolute'})")
+    print(f"    |K| max = {np.hypot(cols['Kx'], cols['Ky']).max():.4g} mm^-1")

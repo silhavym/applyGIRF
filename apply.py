@@ -8,7 +8,7 @@ With pixi:
 import argparse
 from io_helper import read_dsv, load_girf, save_mat, TERM_FOR_AXIS
 from plotting import plot_kspace
-from kfile import update_kfile, adc_start_from_dsv, default_out_name
+from kfile import make_kfile, adc_window_from_dsv
 from core import apply_girf, kspace, girf_dc_gain 
 import numpy as np
  
@@ -54,13 +54,14 @@ def parse_args():
     ap.add_argument("--out", required=True, help="Output .mat file")
     ap.add_argument("--plot", action="store_true", help="Show k-space before/after GIRF")
     ap.add_argument("--save_fig", default=None, help="Save the k-space figure (e.g. kspace.png)")
-    ap.add_argument("--kfile", default=None, help="Rapid-MRSI k-file (CSV: TR,Kx,Ky,time) to update with the GIRF k-space")
-    ap.add_argument("--kfile_out", default=None, help="Output k-file (default <kfile>_girf.txt)")
-    ap.add_argument("--adc_start_us", type=float, default=None, help="ADC start time relative to DSV start (us)")
-    ap.add_argument("--dsv_adc", default=None, help="*_ADC.dsv; used to find the ADC start if --adc_start_us is not given")
-    ap.add_argument("--k_time_scale", type=float, default=1.0, help="Multiply the k-file 'time' column by this to get seconds")
-    ap.add_argument("--k_mode", choices=["replace", "delta"], default="replace",
-                    help="replace: Kx,Ky = GIRF k;  delta: Kx,Ky += (GIRF k - nominal k)")
+    ap.add_argument("--kfile_out", default=None, help="Write a k-file (CSV: TR,Kx,Ky,time) from the GIRF-predicted k-space (needs x and y)")
+    ap.add_argument("--dwell_us", type=float, default=None, help="ADC dwell time (us), needed for --kfile_out")
+    ap.add_argument("--n_adc", type=int, default=None, help="ADC samples per pass (default: from --dsv_adc duration / dwell)")
+    ap.add_argument("--adc_start_us", type=float, default=None, help="ADC start relative to DSV start (us)")
+    ap.add_argument("--dsv_adc", default=None, help="*_ADC.dsv, gives ADC start (and length) if not set explicitly")
+    ap.add_argument("--n_tr", type=int, default=1, help="Write the one-pass trajectory for this many TRs (default 1)")
+    ap.add_argument("--k_time_unit", choices=["s", "ms", "us"], default="s", help="Unit of the 'time' column (default s)")
+    ap.add_argument("--k_absolute", action="store_true", help="Keep absolute k instead of setting k=0 at the first ADC sample")
     return ap.parse_args()
  
  
@@ -80,18 +81,25 @@ def main():
         raise SystemExit("Give at least one of --dsv_x / --dsv_y / --dsv_z")
     save_mat(args.out, out)
     print(f"Saved {args.out}")
-    if args.kfile:
+    if args.kfile_out:
         if "kx_act" not in out or "ky_act" not in out:
-            raise SystemExit("--kfile needs both --dsv_x and --dsv_y")
+            raise SystemExit("--kfile_out needs both --dsv_x and --dsv_y")
+        if args.dwell_us is None:
+            raise SystemExit("--kfile_out needs --dwell_us")
+        start = length = None
+        if args.dsv_adc:
+            start, length = adc_window_from_dsv(args.dsv_adc)
+            print(f"ADC from {args.dsv_adc}: start {start*1e6:.1f} us, duration {length*1e6:.1f} us")
         if args.adc_start_us is not None:
-            adc_start = args.adc_start_us * 1e-6
-        elif args.dsv_adc:
-            adc_start = adc_start_from_dsv(args.dsv_adc)
-            print(f"ADC start from {args.dsv_adc}: {adc_start*1e6:.1f} us")
-        else:
-            raise SystemExit("--kfile needs --adc_start_us or --dsv_adc")
-        update_kfile(args.kfile, args.kfile_out or default_out_name(args.kfile), out,
-                     adc_start, args.k_time_scale, args.k_mode)
+            start = args.adc_start_us * 1e-6
+        if start is None:
+            raise SystemExit("--kfile_out needs --adc_start_us or --dsv_adc")
+        dwell = args.dwell_us * 1e-6
+        n_adc = args.n_adc if args.n_adc else (int(length / dwell + 1e-6) if length else None)
+        if not n_adc:
+            raise SystemExit("--kfile_out needs --n_adc or --dsv_adc")
+        make_kfile(args.kfile_out, out, start, dwell, n_adc, args.n_tr, args.k_time_unit,
+                   not args.k_absolute)
     if args.plot or args.save_fig:
         plot_kspace(out, save=args.save_fig, show=args.plot)
  
