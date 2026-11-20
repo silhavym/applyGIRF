@@ -10,4 +10,4 @@ scipy = "*"
 matplotlib = "*"
 
 [tasks] 
-apply-girf = "pyhton apply.py"
+apply-girf = "python apply.py"
